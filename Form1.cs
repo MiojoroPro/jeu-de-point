@@ -1,4 +1,6 @@
 using System.Drawing.Drawing2D;
+using System.Text.Json;
+using Npgsql;
 
 namespace jeu_de_point
 {
@@ -9,6 +11,12 @@ namespace jeu_de_point
             MenuPrincipal,
             ConfigurationNouvellePartie,
             Partie
+        }
+
+        private enum ModeActionTour
+        {
+            Pose,
+            Tir
         }
 
         private int gridLines = 10;
@@ -24,7 +32,7 @@ namespace jeu_de_point
         private Panel panelConfiguration = null!;
         private Panel carteMenu = null!;
         private Panel carteConfiguration = null!;
-        private FlowLayoutPanel panelActionsPartie = null!;
+        private Panel panelActionsPartie = null!;
 
         private Button boutonNouvellePartie = null!;
         private Button boutonChargerPartie = null!;
@@ -33,11 +41,75 @@ namespace jeu_de_point
         private Button boutonDemarrerPartie = null!;
         private Button boutonMenuPrincipalPartie = null!;
         private Button boutonNouvellePartiePartie = null!;
+        private Button boutonSauvegarderPartie = null!;
+        private ComboBox inputModeAction = null!;
+        private NumericUpDown inputPuissanceTir = null!;
+        private TrackBar inputHauteurCanon = null!;
+        private Label labelModeAction = null!;
+        private Label labelPuissanceTir = null!;
+        private Label labelHauteurCanon = null!;
 
-        // Conserver toutes les lignes tracées (ne plus effacer)
-        private readonly List<((int Col, int Row) Debut, (int Col, int Row) Fin, Color Couleur)> lignesAlignements = new();
+        private const string NomSauvegardeParDefaut = "derniere_partie";
 
-        // Méthode isolée pour brancher les événements souris
+        private readonly record struct LigneValidee((int Col, int Row) Debut, (int Col, int Row) Fin, Joueur Proprietaire)
+        {
+            public Color Couleur => Proprietaire.Couleur;
+            public bool EstDiagonale => Debut.Col != Fin.Col && Debut.Row != Fin.Row;
+        }
+
+        private sealed class EtatPartieSauvegarde
+        {
+            public int GridLines { get; set; }
+            public int IndexJoueurCourant { get; set; }
+            public int ModeTour { get; set; }
+            public int PuissanceTir { get; set; }
+            public int[] HauteursCanons { get; set; } = [];
+            public List<JoueurSauvegarde> Joueurs { get; set; } = [];
+            public List<PointSauvegarde> Points { get; set; } = [];
+            public List<LigneSauvegarde> Lignes { get; set; } = [];
+        }
+
+        private sealed class JoueurSauvegarde
+        {
+            public string Nom { get; set; } = string.Empty;
+            public int CouleurArgb { get; set; }
+            public int Score { get; set; }
+        }
+
+        private sealed class PointSauvegarde
+        {
+            public int Col { get; set; }
+            public int Row { get; set; }
+            public int Proprietaire { get; set; }
+        }
+
+        private sealed class LigneSauvegarde
+        {
+            public int DebutCol { get; set; }
+            public int DebutRow { get; set; }
+            public int FinCol { get; set; }
+            public int FinRow { get; set; }
+            public int Proprietaire { get; set; }
+        }
+
+        // Conserver toutes les lignes validï¿½es pour le score et le rendu
+        private readonly List<LigneValidee> lignesAlignements = new();
+
+        private ModeActionTour modeTour = ModeActionTour.Pose;
+        private readonly int[] hauteursCanonsParJoueur = [0, 0];
+
+        private System.Windows.Forms.Timer timerAnimationTir = null!;
+        private bool tirEnCours;
+        private PointF origineBoulet;
+        private PointF destinationBoulet;
+        private PointF positionBoulet;
+        private float progressionTir;
+        private int ticksPauseImpact;
+        private bool impactTraite;
+        private bool tirDetruitPoint;
+        private (int Col, int Row) pointDetruit;
+
+        // Mï¿½thode isolï¿½e pour brancher les ï¿½vï¿½nements souris
         private void InitialiserEcouteSouris()
         {
             MouseClick += Form1_MouseClick;
@@ -94,7 +166,7 @@ namespace jeu_de_point
                 Margin = new Padding(0)
             };
             ConfigurerStyleBouton(boutonChargerPartie, Color.FromArgb(92, 138, 214), Color.White);
-            boutonChargerPartie.Click += (_, _) => MessageBox.Show("Le scénario 'Charger une partie' sera ajouté ensuite.", "Information", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            boutonChargerPartie.Click += (_, _) => ChargerSauvegardeDepuisMenu();
 
             int largeurBoutonsMenu = Math.Max(
                 TextRenderer.MeasureText(boutonNouvellePartie.Text, boutonNouvellePartie.Font).Width,
@@ -208,21 +280,74 @@ namespace jeu_de_point
             panelConfiguration.Controls.Add(boutonRetourMenuConfiguration);
             panelConfiguration.Controls.Add(carteConfiguration);
 
-            panelActionsPartie = new FlowLayoutPanel
+            panelActionsPartie = new Panel
             {
                 AutoSize = true,
-                FlowDirection = FlowDirection.LeftToRight,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                BackColor = Color.White,
+                Padding = new Padding(10),
+                BorderStyle = BorderStyle.FixedSingle,
+                Visible = false,
+                Dock = DockStyle.Right
+            };
+
+            var colonneActions = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.TopDown,
                 WrapContents = false,
                 BackColor = Color.Transparent,
-                Visible = false
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0)
             };
+
+            var panelNavigation = new Panel
+            {
+                AutoSize = true,
+                BackColor = Color.FromArgb(245, 248, 252),
+                Padding = new Padding(10),
+                BorderStyle = BorderStyle.FixedSingle,
+                Margin = new Padding(0, 0, 0, 10)
+            };
+
+            var layoutNavigation = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
+            };
+
+            var panelCommandes = new Panel
+            {
+                AutoSize = true,
+                BackColor = Color.Transparent,
+                Padding = new Padding(0),
+                Margin = new Padding(0)
+            };
+
+            var layoutCommandes = new TableLayoutPanel
+            {
+                AutoSize = true,
+                ColumnCount = 2,
+                RowCount = 3,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
+            };
+            layoutCommandes.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            layoutCommandes.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            layoutCommandes.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layoutCommandes.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layoutCommandes.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
             boutonMenuPrincipalPartie = new Button
             {
-                Text = "Menu principale",
+                Text = "Menu principal",
                 Font = new Font(Font.FontFamily, 10f, FontStyle.Bold),
-                Size = new Size(170, 36),
-                Margin = new Padding(0, 0, 10, 0)
+                Size = new Size(180, 38),
+                Margin = new Padding(0, 0, 0, 8)
             };
             ConfigurerStyleBouton(boutonMenuPrincipalPartie, Color.FromArgb(88, 105, 128), Color.White);
             boutonMenuPrincipalPartie.Click += (_, _) => AfficherMenuPrincipal();
@@ -231,14 +356,114 @@ namespace jeu_de_point
             {
                 Text = "Nouvelle partie",
                 Font = new Font(Font.FontFamily, 10f, FontStyle.Bold),
-                Size = new Size(170, 36),
-                Margin = new Padding(0)
+                Size = new Size(180, 38),
+                Margin = new Padding(0, 0, 0, 8)
             };
             ConfigurerStyleBouton(boutonNouvellePartiePartie, Color.FromArgb(38, 112, 233), Color.White);
             boutonNouvellePartiePartie.Click += (_, _) => AfficherConfigurationNouvellePartie();
 
-            panelActionsPartie.Controls.Add(boutonMenuPrincipalPartie);
-            panelActionsPartie.Controls.Add(boutonNouvellePartiePartie);
+            boutonSauvegarderPartie = new Button
+            {
+                Text = "Sauvegarder",
+                Font = new Font(Font.FontFamily, 10f, FontStyle.Bold),
+                Size = new Size(180, 38),
+                Margin = new Padding(0)
+            };
+            ConfigurerStyleBouton(boutonSauvegarderPartie, Color.FromArgb(34, 148, 83), Color.White);
+            boutonSauvegarderPartie.Click += (_, _) => SauvegarderPartieEnCours();
+
+            labelModeAction = new Label
+            {
+                AutoSize = true,
+                Text = "Mode",
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0, 8, 6, 0),
+                ForeColor = Color.FromArgb(45, 58, 78),
+                Font = new Font(Font.FontFamily, 9f, FontStyle.Bold)
+            };
+
+            inputModeAction = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 110,
+                Margin = new Padding(0, 4, 14, 0)
+            };
+            inputModeAction.Items.Add("Pose");
+            inputModeAction.Items.Add("Tir");
+            inputModeAction.SelectedIndex = 0;
+            inputModeAction.SelectedIndexChanged += (_, _) =>
+            {
+                modeTour = inputModeAction.SelectedIndex == 1 ? ModeActionTour.Tir : ModeActionTour.Pose;
+                MettreAJourVisibiliteControlesTir();
+                Invalidate();
+            };
+
+            labelPuissanceTir = new Label
+            {
+                AutoSize = true,
+                Text = "Puissance",
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(14, 4, 8, 0),
+                ForeColor = Color.FromArgb(45, 58, 78),
+                Font = new Font(Font.FontFamily, 9f, FontStyle.Bold)
+            };
+
+            inputPuissanceTir = new NumericUpDown
+            {
+                Minimum = 1,
+                Maximum = 9,
+                Value = 5,
+                Width = 55,
+                Margin = new Padding(0, 2, 0, 0)
+            };
+
+            labelHauteurCanon = new Label
+            {
+                AutoSize = true,
+                Text = "Hauteur",
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0, 4, 8, 0),
+                ForeColor = Color.FromArgb(45, 58, 78),
+                Font = new Font(Font.FontFamily, 9f, FontStyle.Bold)
+            };
+
+            inputHauteurCanon = new TrackBar
+            {
+                Minimum = 0,
+                Maximum = 9,
+                Value = 5,
+                TickStyle = TickStyle.None,
+                Width = 130,
+                Height = 32,
+                Margin = new Padding(0, -2, 0, 0)
+            };
+            inputHauteurCanon.ValueChanged += (_, _) =>
+            {
+                if (joueurs.Length == 0 || tirEnCours)
+                {
+                    return;
+                }
+
+                hauteursCanonsParJoueur[indexJoueurCourant] = inputHauteurCanon.Value;
+                Invalidate();
+            };
+
+            layoutNavigation.Controls.Add(boutonMenuPrincipalPartie);
+            layoutNavigation.Controls.Add(boutonNouvellePartiePartie);
+            layoutNavigation.Controls.Add(boutonSauvegarderPartie);
+            panelNavigation.Controls.Add(layoutNavigation);
+
+            layoutCommandes.Controls.Add(labelModeAction, 0, 0);
+            layoutCommandes.Controls.Add(inputModeAction, 1, 0);
+            layoutCommandes.Controls.Add(labelPuissanceTir, 0, 1);
+            layoutCommandes.Controls.Add(inputPuissanceTir, 1, 1);
+            layoutCommandes.Controls.Add(labelHauteurCanon, 0, 2);
+            layoutCommandes.Controls.Add(inputHauteurCanon, 1, 2);
+            panelCommandes.Controls.Add(layoutCommandes);
+
+            colonneActions.Controls.Add(panelNavigation);
+            colonneActions.Controls.Add(panelCommandes);
+            panelActionsPartie.Controls.Add(colonneActions);
 
             Controls.Add(panelMenu);
             Controls.Add(panelConfiguration);
@@ -252,6 +477,16 @@ namespace jeu_de_point
 
             RecentrerLayout();
             PositionnerBoutonsHautDroite();
+            MettreAJourVisibiliteControlesTir();
+        }
+
+        private void MettreAJourVisibiliteControlesTir()
+        {
+            bool estTir = modeTour == ModeActionTour.Tir;
+            labelPuissanceTir.Visible = estTir;
+            inputPuissanceTir.Visible = estTir;
+            labelHauteurCanon.Visible = estTir;
+            inputHauteurCanon.Visible = estTir;
         }
 
         private void PositionnerBoutonsHautDroite()
@@ -262,7 +497,7 @@ namespace jeu_de_point
                 boutonRetourMenuConfiguration.Top = 18;
             }
 
-            if (panelActionsPartie != null)
+            if (panelActionsPartie != null && panelActionsPartie.Dock == DockStyle.None)
             {
                 panelActionsPartie.Left = ClientSize.Width - panelActionsPartie.Width - 18;
                 panelActionsPartie.Top = 18;
@@ -312,8 +547,22 @@ namespace jeu_de_point
             gridLines = Math.Max(2, valeurGridLines);
             pointsPoses.Clear();
             lignesAlignements.Clear();
+            tirEnCours = false;
+            progressionTir = 0f;
 
             InitialiserJoueursEtTour();
+
+            modeTour = ModeActionTour.Pose;
+            inputModeAction.SelectedIndex = 0;
+
+            int hauteurInitiale = (gridLines - 1) / 2;
+            hauteursCanonsParJoueur[0] = hauteurInitiale;
+            hauteursCanonsParJoueur[1] = hauteurInitiale;
+
+            inputHauteurCanon.Minimum = 0;
+            inputHauteurCanon.Maximum = Math.Max(0, gridLines - 1);
+            inputHauteurCanon.Value = Math.Clamp(hauteurInitiale, inputHauteurCanon.Minimum, inputHauteurCanon.Maximum);
+            MettreAJourVisibiliteControlesTir();
 
             etatEcran = EtatEcran.Partie;
             panelMenu.Visible = false;
@@ -321,10 +570,11 @@ namespace jeu_de_point
             panelActionsPartie.Visible = true;
             panelActionsPartie.BringToFront();
             PositionnerBoutonsHautDroite();
+            SynchroniserControlesTour();
             Invalidate();
         }
 
-        // Méthode isolée pour initialiser les joueurs et le tour
+        // Mï¿½thode isolï¿½e pour initialiser les joueurs et le tour
         private void InitialiserJoueursEtTour()
         {
             joueurs =
@@ -341,9 +591,310 @@ namespace jeu_de_point
         private void PasserAuJoueurSuivant()
         {
             indexJoueurCourant = (indexJoueurCourant + 1) % joueurs.Length;
+            SynchroniserControlesTour();
         }
 
-        // Normaliser une ligne pour que Debut <= Fin (lexicographique) afin d'éviter les doublons inversés
+        private void SynchroniserControlesTour()
+        {
+            if (joueurs.Length == 0)
+            {
+                return;
+            }
+
+            int min = inputHauteurCanon.Minimum;
+            int max = inputHauteurCanon.Maximum;
+            int hauteur = Math.Clamp(hauteursCanonsParJoueur[indexJoueurCourant], min, max);
+            hauteursCanonsParJoueur[indexJoueurCourant] = hauteur;
+            if (inputHauteurCanon.Value != hauteur)
+            {
+                inputHauteurCanon.Value = hauteur;
+            }
+        }
+
+        private string ObtenirConnectionStringPostgres()
+        {
+            return Environment.GetEnvironmentVariable("JEU_DB_CONNECTION")
+                ?? "Host=localhost;Port=5432;Username=postgres;Password=root;Database=jeu_de_point";
+        }
+
+        private bool InitialiserTableSauvegardes(out string erreur)
+        {
+            erreur = string.Empty;
+
+            try
+            {
+                using var connexion = new NpgsqlConnection(ObtenirConnectionStringPostgres());
+                connexion.Open();
+
+                const string sql = """
+                    CREATE TABLE IF NOT EXISTS parties_sauvegardes (
+                        nom TEXT PRIMARY KEY,
+                        data JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    """;
+
+                using var commande = new NpgsqlCommand(sql, connexion);
+                commande.ExecuteNonQuery();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                erreur = ex.Message;
+                return false;
+            }
+        }
+
+        private EtatPartieSauvegarde ConstruireEtatSauvegarde()
+        {
+            var etat = new EtatPartieSauvegarde
+            {
+                GridLines = gridLines,
+                IndexJoueurCourant = indexJoueurCourant,
+                ModeTour = modeTour == ModeActionTour.Tir ? 1 : 0,
+                PuissanceTir = (int)inputPuissanceTir.Value,
+                HauteursCanons =
+                [
+                    hauteursCanonsParJoueur[0],
+                    hauteursCanonsParJoueur[1]
+                ]
+            };
+
+            for (int i = 0; i < joueurs.Length; i++)
+            {
+                etat.Joueurs.Add(new JoueurSauvegarde
+                {
+                    Nom = joueurs[i].Nom,
+                    CouleurArgb = joueurs[i].Couleur.ToArgb(),
+                    Score = joueurs[i].Score
+                });
+            }
+
+            foreach (var (position, proprietaire) in pointsPoses)
+            {
+                int indexProprietaire = Array.IndexOf(joueurs, proprietaire);
+                if (indexProprietaire < 0)
+                {
+                    continue;
+                }
+
+                etat.Points.Add(new PointSauvegarde
+                {
+                    Col = position.Col,
+                    Row = position.Row,
+                    Proprietaire = indexProprietaire
+                });
+            }
+
+            foreach (var ligne in lignesAlignements)
+            {
+                int indexProprietaire = Array.IndexOf(joueurs, ligne.Proprietaire);
+                if (indexProprietaire < 0)
+                {
+                    continue;
+                }
+
+                etat.Lignes.Add(new LigneSauvegarde
+                {
+                    DebutCol = ligne.Debut.Col,
+                    DebutRow = ligne.Debut.Row,
+                    FinCol = ligne.Fin.Col,
+                    FinRow = ligne.Fin.Row,
+                    Proprietaire = indexProprietaire
+                });
+            }
+
+            return etat;
+        }
+
+        private bool SauvegarderDansPostgres(string nomSauvegarde, out string erreur)
+        {
+            erreur = string.Empty;
+
+            if (!InitialiserTableSauvegardes(out erreur))
+            {
+                return false;
+            }
+
+            try
+            {
+                string json = JsonSerializer.Serialize(ConstruireEtatSauvegarde());
+
+                using var connexion = new NpgsqlConnection(ObtenirConnectionStringPostgres());
+                connexion.Open();
+
+                const string sql = """
+                    INSERT INTO parties_sauvegardes (nom, data, updated_at)
+                    VALUES (@nom, CAST(@data AS jsonb), NOW())
+                    ON CONFLICT (nom)
+                    DO UPDATE SET data = EXCLUDED.data, updated_at = NOW();
+                    """;
+
+                using var commande = new NpgsqlCommand(sql, connexion);
+                commande.Parameters.AddWithValue("nom", nomSauvegarde);
+                commande.Parameters.AddWithValue("data", json);
+                commande.ExecuteNonQuery();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                erreur = ex.Message;
+                return false;
+            }
+        }
+
+        private bool ChargerDepuisPostgres(string nomSauvegarde, out string erreur)
+        {
+            erreur = string.Empty;
+
+            if (!InitialiserTableSauvegardes(out erreur))
+            {
+                return false;
+            }
+
+            try
+            {
+                using var connexion = new NpgsqlConnection(ObtenirConnectionStringPostgres());
+                connexion.Open();
+
+                const string sql = "SELECT data::text FROM parties_sauvegardes WHERE nom = @nom;";
+                using var commande = new NpgsqlCommand(sql, connexion);
+                commande.Parameters.AddWithValue("nom", nomSauvegarde);
+
+                string? json = commande.ExecuteScalar() as string;
+                if (string.IsNullOrWhiteSpace(json))
+                {
+                    erreur = "Aucune sauvegarde disponible.";
+                    return false;
+                }
+
+                var etat = JsonSerializer.Deserialize<EtatPartieSauvegarde>(json);
+                if (etat is null)
+                {
+                    erreur = "Sauvegarde invalide.";
+                    return false;
+                }
+
+                AppliquerEtatSauvegarde(etat);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                erreur = ex.Message;
+                return false;
+            }
+        }
+
+        private void AppliquerEtatSauvegarde(EtatPartieSauvegarde etat)
+        {
+            gridLines = Math.Max(2, etat.GridLines);
+
+            joueurs = etat.Joueurs
+                .Select(j =>
+                {
+                    var joueur = new Joueur(j.Nom, Color.FromArgb(j.CouleurArgb));
+                    joueur.DefinirScore(j.Score);
+                    return joueur;
+                })
+                .ToArray();
+
+            if (joueurs.Length < 2)
+            {
+                InitialiserJoueursEtTour();
+            }
+
+            pointsPoses.Clear();
+            lignesAlignements.Clear();
+
+            foreach (var point in etat.Points)
+            {
+                if (point.Col < 0 || point.Col >= gridLines || point.Row < 0 || point.Row >= gridLines)
+                {
+                    continue;
+                }
+
+                if (point.Proprietaire < 0 || point.Proprietaire >= joueurs.Length)
+                {
+                    continue;
+                }
+
+                pointsPoses[(point.Col, point.Row)] = joueurs[point.Proprietaire];
+            }
+
+            foreach (var ligne in etat.Lignes)
+            {
+                if (ligne.Proprietaire < 0 || ligne.Proprietaire >= joueurs.Length)
+                {
+                    continue;
+                }
+
+                var debut = (ligne.DebutCol, ligne.DebutRow);
+                var fin = (ligne.FinCol, ligne.FinRow);
+                var normalisee = NormaliserLigne(debut, fin);
+                lignesAlignements.Add(new LigneValidee(normalisee.Debut, normalisee.Fin, joueurs[ligne.Proprietaire]));
+            }
+
+            indexJoueurCourant = Math.Clamp(etat.IndexJoueurCourant, 0, joueurs.Length - 1);
+            modeTour = etat.ModeTour == 1 ? ModeActionTour.Tir : ModeActionTour.Pose;
+
+            inputModeAction.SelectedIndex = modeTour == ModeActionTour.Tir ? 1 : 0;
+            inputPuissanceTir.Value = Math.Clamp(etat.PuissanceTir, (int)inputPuissanceTir.Minimum, (int)inputPuissanceTir.Maximum);
+
+            int hauteur0 = etat.HauteursCanons.Length > 0 ? etat.HauteursCanons[0] : 0;
+            int hauteur1 = etat.HauteursCanons.Length > 1 ? etat.HauteursCanons[1] : 0;
+            hauteursCanonsParJoueur[0] = hauteur0;
+            hauteursCanonsParJoueur[1] = hauteur1;
+
+            inputHauteurCanon.Minimum = 0;
+            inputHauteurCanon.Maximum = Math.Max(0, gridLines - 1);
+            SynchroniserControlesTour();
+
+            tirEnCours = false;
+            timerAnimationTir.Stop();
+            progressionTir = 0f;
+            ticksPauseImpact = 0;
+            impactTraite = false;
+
+            etatEcran = EtatEcran.Partie;
+            panelMenu.Visible = false;
+            panelConfiguration.Visible = false;
+            panelActionsPartie.Visible = true;
+            panelActionsPartie.BringToFront();
+            PositionnerBoutonsHautDroite();
+            MettreAJourVisibiliteControlesTir();
+            Invalidate();
+        }
+
+        private void SauvegarderPartieEnCours()
+        {
+            if (etatEcran != EtatEcran.Partie)
+            {
+                return;
+            }
+
+            if (SauvegarderDansPostgres(NomSauvegardeParDefaut, out string erreur))
+            {
+                MessageBox.Show("Partie sauvegardï¿½e dans PostgreSQL.", "Sauvegarde", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                MessageBox.Show($"Impossible de sauvegarder la partie.\n\nDï¿½tail: {erreur}", "Erreur PostgreSQL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ChargerSauvegardeDepuisMenu()
+        {
+            if (ChargerDepuisPostgres(NomSauvegardeParDefaut, out string erreur))
+            {
+                MessageBox.Show("Sauvegarde chargï¿½e depuis PostgreSQL.", "Chargement", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                MessageBox.Show($"Impossible de charger la sauvegarde.\n\nDï¿½tail: {erreur}", "Erreur PostgreSQL", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // Normaliser une ligne pour que Debut <= Fin (lexicographique) afin d'ï¿½viter les doublons inversï¿½s
         private ((int Col, int Row) Debut, (int Col, int Row) Fin) NormaliserLigne((int Col, int Row) a, (int Col, int Row) b)
         {
             if (a.Col < b.Col) return (a, b);
@@ -352,10 +903,10 @@ namespace jeu_de_point
             return (b, a);
         }
 
-        // Méthode isolée: détecter 5 points alignés (horizontale, verticale, oblique)
-        private bool TryTrouverAlignementCinq((int Col, int Row) pointJoue, Joueur joueur, out ((int Col, int Row) Debut, (int Col, int Row) Fin) ligne)
+        // Mï¿½thode isolï¿½e: dï¿½tecter toutes les lignes candidates (5 points consï¿½cutifs ou plus)
+        private List<((int Col, int Row) Debut, (int Col, int Row) Fin)> TrouverLignesCandidatesPose((int Col, int Row) pointJoue, Joueur joueur)
         {
-            ligne = default;
+            var resultats = new List<((int Col, int Row) Debut, (int Col, int Row) Fin)>();
 
             (int dCol, int dRow)[] directions =
             [
@@ -378,7 +929,6 @@ namespace jeu_de_point
                     row -= dRow;
                 }
 
-                int indexPointJoue = sequence.Count;
                 sequence.Add(pointJoue);
 
                 col = pointJoue.Col + dCol;
@@ -395,25 +945,164 @@ namespace jeu_de_point
                     continue;
                 }
 
-                int startIndex = Math.Clamp(indexPointJoue - 2, 0, sequence.Count - 5);
-                var debut = sequence[startIndex];
-                var fin = sequence[startIndex + 4];
+                var normalisee = NormaliserLigne(sequence[0], sequence[^1]);
+                if (!resultats.Any(l => l.Debut == normalisee.Debut && l.Fin == normalisee.Fin))
+                {
+                    resultats.Add(normalisee);
+                }
+            }
 
-                ligne = (debut, fin);
+            return resultats;
+        }
+
+        private IEnumerable<(int Col, int Row)> EnumererPointsLigne((int Col, int Row) debut, (int Col, int Row) fin)
+        {
+            int dCol = Math.Sign(fin.Col - debut.Col);
+            int dRow = Math.Sign(fin.Row - debut.Row);
+            int longueur = Math.Max(Math.Abs(fin.Col - debut.Col), Math.Abs(fin.Row - debut.Row));
+
+            for (int i = 0; i <= longueur; i++)
+            {
+                yield return (debut.Col + (i * dCol), debut.Row + (i * dRow));
+            }
+        }
+
+        private static long ProduitVectoriel((int Col, int Row) a, (int Col, int Row) b, (int Col, int Row) c)
+        {
+            return ((long)(b.Col - a.Col) * (c.Row - a.Row)) - ((long)(b.Row - a.Row) * (c.Col - a.Col));
+        }
+
+        private static bool PointSurSegment((int Col, int Row) a, (int Col, int Row) b, (int Col, int Row) p)
+        {
+            return p.Col >= Math.Min(a.Col, b.Col) && p.Col <= Math.Max(a.Col, b.Col)
+                && p.Row >= Math.Min(a.Row, b.Row) && p.Row <= Math.Max(a.Row, b.Row);
+        }
+
+        private static bool SegmentsSeCroisent((int Col, int Row) a, (int Col, int Row) b, (int Col, int Row) c, (int Col, int Row) d)
+        {
+            long o1 = ProduitVectoriel(a, b, c);
+            long o2 = ProduitVectoriel(a, b, d);
+            long o3 = ProduitVectoriel(c, d, a);
+            long o4 = ProduitVectoriel(c, d, b);
+
+            if ((o1 > 0 && o2 < 0 || o1 < 0 && o2 > 0) && (o3 > 0 && o4 < 0 || o3 < 0 && o4 > 0))
+            {
                 return true;
+            }
+
+            if (o1 == 0 && PointSurSegment(a, b, c)) return true;
+            if (o2 == 0 && PointSurSegment(a, b, d)) return true;
+            if (o3 == 0 && PointSurSegment(c, d, a)) return true;
+            if (o4 == 0 && PointSurSegment(c, d, b)) return true;
+
+            return false;
+        }
+
+        private bool EstLigneValideSelonRegles((int Col, int Row) debut, (int Col, int Row) fin, Joueur joueur)
+        {
+            var pointsNouvelleLigne = EnumererPointsLigne(debut, fin).ToHashSet();
+
+            foreach (var ligneExistante in lignesAlignements)
+            {
+                if (!ReferenceEquals(ligneExistante.Proprietaire, joueur)
+                    && ligneExistante.EstDiagonale
+                    && SegmentsSeCroisent(debut, fin, ligneExistante.Debut, ligneExistante.Fin))
+                {
+                    return false;
+                }
+
+                int pointsCommuns = EnumererPointsLigne(ligneExistante.Debut, ligneExistante.Fin)
+                    .Count(pointsNouvelleLigne.Contains);
+                if (pointsCommuns > 1)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private bool PointAppartientALigneValidee((int Col, int Row) point)
+        {
+            foreach (var ligne in lignesAlignements)
+            {
+                if (EnumererPointsLigne(ligne.Debut, ligne.Fin).Contains(point))
+                {
+                    return true;
+                }
             }
 
             return false;
         }
 
-        private void Form1_MouseClick(object? sender, MouseEventArgs e)
+        private PointF ObtenirPositionCanonPourJoueur(int indexJoueur, int startX, int startY, int gridSize, float step)
         {
-            if (etatEcran != EtatEcran.Partie)
+            float x = indexJoueur == 0 ? startX - (step * 0.9f) : startX + gridSize + (step * 0.9f);
+            int row = Math.Clamp(hauteursCanonsParJoueur[indexJoueur], 0, gridLines - 1);
+            float y = startY + (row * step);
+            return new PointF(x, y);
+        }
+
+        private void DemarrerAnimationTir(PointF origine, PointF destination, bool detruitPoint, (int Col, int Row) pointCible)
+        {
+            origineBoulet = origine;
+            destinationBoulet = destination;
+            positionBoulet = origine;
+            progressionTir = 0f;
+            ticksPauseImpact = 0;
+            impactTraite = false;
+            tirEnCours = true;
+            tirDetruitPoint = detruitPoint;
+            pointDetruit = pointCible;
+            timerAnimationTir.Start();
+        }
+
+        private void TimerAnimationTir_Tick(object? sender, EventArgs e)
+        {
+            const float vitesseAnimation = 0.04f;
+            const int pauseImpactTicks = 14;
+
+            if (progressionTir < 1f)
             {
-                return;
+                progressionTir += vitesseAnimation;
+                progressionTir = Math.Min(1f, progressionTir);
+
+                float x = origineBoulet.X + ((destinationBoulet.X - origineBoulet.X) * progressionTir);
+                float y = origineBoulet.Y + ((destinationBoulet.Y - origineBoulet.Y) * progressionTir);
+                positionBoulet = new PointF(x, y);
+            }
+            else
+            {
+                positionBoulet = destinationBoulet;
+
+                if (!impactTraite)
+                {
+                    if (tirDetruitPoint
+                        && pointsPoses.TryGetValue(pointDetruit, out var proprietaire)
+                        && !ReferenceEquals(proprietaire, JoueurCourant)
+                        && !PointAppartientALigneValidee(pointDetruit))
+                    {
+                        pointsPoses.Remove(pointDetruit);
+                    }
+
+                    impactTraite = true;
+                }
+
+                ticksPauseImpact++;
+                if (ticksPauseImpact >= pauseImpactTicks)
+                {
+                    timerAnimationTir.Stop();
+                    tirEnCours = false;
+                    PasserAuJoueurSuivant();
+                }
             }
 
-            if (!TryGetNearestIntersection(e.Location, out var intersection))
+            Invalidate();
+        }
+
+        private void JouerModePose(Point clickPosition)
+        {
+            if (!TryGetNearestIntersection(clickPosition, out var intersection))
             {
                 return;
             }
@@ -426,23 +1115,106 @@ namespace jeu_de_point
             var joueurQuiJoue = JoueurCourant;
             pointsPoses[intersection] = joueurQuiJoue;
 
-            if (TryTrouverAlignementCinq(intersection, joueurQuiJoue, out var ligne))
+            var lignesCandidates = TrouverLignesCandidatesPose(intersection, joueurQuiJoue);
+            int lignesValideesCeTour = 0;
+
+            foreach (var ligne in lignesCandidates)
             {
                 var normalisee = NormaliserLigne(ligne.Debut, ligne.Fin);
 
-                bool existe = lignesAlignements.Any(l => l.Debut == normalisee.Debut && l.Fin == normalisee.Fin && l.Couleur.ToArgb() == joueurQuiJoue.Couleur.ToArgb());
-                if (!existe)
+                bool existe = lignesAlignements.Any(l => l.Debut == normalisee.Debut && l.Fin == normalisee.Fin && ReferenceEquals(l.Proprietaire, joueurQuiJoue));
+                if (existe)
                 {
-                    lignesAlignements.Add((normalisee.Debut, normalisee.Fin, joueurQuiJoue.Couleur));
+                    continue;
+                }
+
+                if (EstLigneValideSelonRegles(normalisee.Debut, normalisee.Fin, joueurQuiJoue))
+                {
+                    lignesAlignements.Add(new LigneValidee(normalisee.Debut, normalisee.Fin, joueurQuiJoue));
                     joueurQuiJoue.AjouterPoint();
+                    lignesValideesCeTour++;
                 }
             }
 
-            PasserAuJoueurSuivant();
+            if (lignesValideesCeTour == 0)
+            {
+                PasserAuJoueurSuivant();
+            }
+        }
+
+        private void JouerModeTir(Point clickPosition)
+        {
+            if (!TryGetNearestIntersection(clickPosition, out var intersection))
+            {
+                return;
+            }
+
+            if (!TryGetGridGeometry(out int startX, out int startY, out int gridSize, out float step))
+            {
+                return;
+            }
+
+            int indexJoueur = indexJoueurCourant;
+            PointF origineCanon = ObtenirPositionCanonPourJoueur(indexJoueur, startX, startY, gridSize, step);
+
+            float cibleX = startX + (intersection.Col * step);
+            float cibleY = startY + (intersection.Row * step);
+            PointF cible = new(cibleX, cibleY);
+
+            float dx = cible.X - origineCanon.X;
+            float dy = cible.Y - origineCanon.Y;
+            float distance = (float)Math.Sqrt((dx * dx) + (dy * dy));
+            if (distance < 0.001f)
+            {
+                return;
+            }
+
+            int puissance = (int)inputPuissanceTir.Value;
+            float porteeMaxPixels = (puissance / 9f) * gridSize;
+
+            float t = Math.Min(1f, porteeMaxPixels / distance);
+            PointF impact = new(
+                origineCanon.X + (dx * t),
+                origineCanon.Y + (dy * t));
+
+            bool cibleAtteinte = distance <= porteeMaxPixels + 0.001f;
+            bool detruitPoint = false;
+            if (cibleAtteinte
+                && pointsPoses.TryGetValue(intersection, out var proprietaire)
+                && !ReferenceEquals(proprietaire, JoueurCourant)
+                && !PointAppartientALigneValidee(intersection))
+            {
+                detruitPoint = true;
+            }
+
+            DemarrerAnimationTir(origineCanon, impact, detruitPoint, intersection);
+        }
+
+        private void Form1_MouseClick(object? sender, MouseEventArgs e)
+        {
+            if (etatEcran != EtatEcran.Partie)
+            {
+                return;
+            }
+
+            if (tirEnCours)
+            {
+                return;
+            }
+
+            if (modeTour == ModeActionTour.Pose)
+            {
+                JouerModePose(e.Location);
+            }
+            else
+            {
+                JouerModeTir(e.Location);
+            }
+
             Invalidate();
         }
 
-        // Méthode isolée: transforme un clic en intersection la plus proche
+        // Mï¿½thode isolï¿½e: transforme un clic en intersection la plus proche
         private bool TryGetNearestIntersection(Point clickPoint, out (int Col, int Row) intersection)
         {
             intersection = default;
@@ -477,11 +1249,18 @@ namespace jeu_de_point
 
         private bool TryGetGridGeometry(out int startX, out int startY, out int gridSize, out float step)
         {
-            int usableWidth = ClientSize.Width - (PaddingAroundGrid * 2);
+            int reserveDroite = 0;
+            if (etatEcran == EtatEcran.Partie && panelActionsPartie != null && panelActionsPartie.Visible)
+            {
+                reserveDroite = panelActionsPartie.Width + 16;
+            }
+
+            int usableWidth = ClientSize.Width - (PaddingAroundGrid * 2) - reserveDroite;
             int usableHeight = ClientSize.Height - (PaddingAroundGrid * 2);
             gridSize = Math.Max(100, Math.Min(usableWidth, usableHeight));
 
-            startX = (ClientSize.Width - gridSize) / 2;
+            int leftMargin = PaddingAroundGrid;
+            startX = leftMargin + ((usableWidth - gridSize) / 2);
             startY = (ClientSize.Height - gridSize) / 2;
 
             if (gridLines < 2)
@@ -494,7 +1273,7 @@ namespace jeu_de_point
             return true;
         }
 
-        // Méthode isolée pour dessiner l'information du tour
+        // Mï¿½thode isolï¿½e pour dessiner l'information du tour
         private void DessinerTourCourant(Graphics g)
         {
             if (joueurs.Length == 0)
@@ -502,12 +1281,51 @@ namespace jeu_de_point
                 return;
             }
 
-            string texte = $"Tour: {JoueurCourant.Nom}";
+            string texte = $"Tour: {JoueurCourant.Nom} | Mode: {modeTour}";
             using var brush = new SolidBrush(JoueurCourant.Couleur);
             g.DrawString(texte, Font, brush, 20, 20);
         }
 
-        // Méthode isolée pour dessiner le score des joueurs au-dessus de la grille
+        private void DessinerCanons(Graphics g, int startX, int startY, int gridSize, float step)
+        {
+            if (joueurs.Length < 2)
+            {
+                return;
+            }
+
+            for (int i = 0; i < joueurs.Length; i++)
+            {
+                PointF position = ObtenirPositionCanonPourJoueur(i, startX, startY, gridSize, step);
+                bool estJoueurCourant = i == indexJoueurCourant;
+
+                float rayon = Math.Max(6f, step * 0.18f);
+                using var brush = new SolidBrush(joueurs[i].Couleur);
+                using var pen = new Pen(estJoueurCourant ? Color.Gold : Color.FromArgb(30, 30, 30), estJoueurCourant ? 2.8f : 1.6f);
+
+                g.FillEllipse(brush, position.X - rayon, position.Y - rayon, rayon * 2, rayon * 2);
+                g.DrawEllipse(pen, position.X - rayon, position.Y - rayon, rayon * 2, rayon * 2);
+
+                float direction = i == 0 ? 1f : -1f;
+                float canonLongueur = Math.Max(12f, step * 0.55f);
+                float x2 = position.X + (direction * canonLongueur);
+                using var penCanon = new Pen(joueurs[i].Couleur, 4f);
+                g.DrawLine(penCanon, position.X, position.Y, x2, position.Y);
+            }
+        }
+
+        private void DessinerBouletSiNecessaire(Graphics g, float step)
+        {
+            if (!tirEnCours)
+            {
+                return;
+            }
+
+            float rayon = Math.Max(4f, step * 0.16f);
+            using var brush = new SolidBrush(Color.FromArgb(40, 40, 40));
+            g.FillEllipse(brush, positionBoulet.X - rayon, positionBoulet.Y - rayon, rayon * 2, rayon * 2);
+        }
+
+        // Mï¿½thode isolï¿½e pour dessiner le score des joueurs au-dessus de la grille
         private void DessinerScores(Graphics g)
         {
             if (joueurs.Length == 0)
@@ -555,7 +1373,7 @@ namespace jeu_de_point
             }
         }
 
-        // Méthode isolée pour dessiner toutes les lignes d'alignement déjà trouvées
+        // Mï¿½thode isolï¿½e pour dessiner toutes les lignes d'alignement dï¿½jï¿½ trouvï¿½es
         private void DessinerLignesAlignement(Graphics g, int startX, int startY, float step)
         {
             if (lignesAlignements.Count == 0)
@@ -563,19 +1381,21 @@ namespace jeu_de_point
                 return;
             }
 
-            foreach (var (debut, fin, couleur) in lignesAlignements)
+            foreach (var ligne in lignesAlignements)
             {
+                var debut = ligne.Debut;
+                var fin = ligne.Fin;
                 float x1 = startX + (debut.Col * step);
                 float y1 = startY + (debut.Row * step);
                 float x2 = startX + (fin.Col * step);
                 float y2 = startY + (fin.Row * step);
 
-                using var pen = new Pen(couleur, 4.5f);
+                using var pen = new Pen(ligne.Couleur, 4.5f);
                 g.DrawLine(pen, x1, y1, x2, y2);
             }
         }
 
-        // Méthode isolée pour dessiner la grille, appelable depuis d'autres endroits
+        // Mï¿½thode isolï¿½e pour dessiner la grille, appelable depuis d'autres endroits
         private void dessinerTerrain(Graphics g)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -610,8 +1430,11 @@ namespace jeu_de_point
                 g.FillEllipse(brush, x - rayonPoint, y - rayonPoint, rayonPoint * 2, rayonPoint * 2);
             }
 
-            // Dessiner toutes les lignes déjà trouvées (persistantes)
+            DessinerCanons(g, startX, startY, gridSize, step);
+
+            // Dessiner toutes les lignes dï¿½jï¿½ trouvï¿½es (persistantes)
             DessinerLignesAlignement(g, startX, startY, step);
+            DessinerBouletSiNecessaire(g, step);
         }
 
         public Form1()
@@ -619,6 +1442,9 @@ namespace jeu_de_point
             InitializeComponent();
             DoubleBuffered = true;
             ResizeRedraw = true;
+
+            timerAnimationTir = new System.Windows.Forms.Timer { Interval = 20 };
+            timerAnimationTir.Tick += TimerAnimationTir_Tick;
 
             InitialiserJoueursEtTour();
             InitialiserEcouteSouris();

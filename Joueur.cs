@@ -16,5 +16,10 @@ namespace jeu_de_point
         {
             Score++;
         }
+
+        public void DefinirScore(int score)
+        {
+            Score = Math.Max(0, score);
+        }
     }
 }
