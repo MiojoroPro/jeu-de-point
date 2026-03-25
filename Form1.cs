@@ -614,7 +614,7 @@ namespace jeu_de_point
         private string ObtenirConnectionStringPostgres()
         {
             return Environment.GetEnvironmentVariable("JEU_DB_CONNECTION")
-                ?? "Host=localhost;Port=5432;Username=postgres;Password=root;Database=jeu_de_point";
+                ?? "Host=localhost;Port=5432;Username=postgres;Password=sosety;Database=jeu_de_point";
         }
 
         private bool InitialiserTableSauvegardes(out string erreur)
