@@ -50,6 +50,7 @@ namespace jeu_de_point
         private Label labelHauteurCanon = null!;
 
         private const string NomSauvegardeParDefaut = "derniere_partie";
+        private const string NomSauvegardeListe = "liste_sauvegardes";
 
         private readonly record struct LigneValidee((int Col, int Row) Debut, (int Col, int Row) Fin, Joueur Proprietaire)
         {
@@ -785,6 +786,151 @@ namespace jeu_de_point
             }
         }
 
+        private bool ListerSauvegardes(out List<string> noms, out string erreur)
+        {
+            noms = new List<string>();
+            erreur = string.Empty;
+
+            if (!InitialiserTableSauvegardes(out erreur))
+            {
+                return false;
+            }
+
+            try
+            {
+                using var connexion = new NpgsqlConnection(ObtenirConnectionStringPostgres());
+                connexion.Open();
+
+                const string sql = "SELECT nom FROM parties_sauvegardes ORDER BY updated_at DESC;";
+                using var commande = new NpgsqlCommand(sql, connexion);
+                using var reader = commande.ExecuteReader();
+                while (reader.Read())
+                {
+                    noms.Add(reader.GetString(0));
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                erreur = ex.Message;
+                return false;
+            }
+        }
+
+        private string PromptNomSauvegarde()
+        {
+            using var dlg = new Form
+            {
+                Text = "Nom de la sauvegarde",
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                ClientSize = new Size(320, 140),
+                MinimizeBox = false,
+                MaximizeBox = false,
+                ShowInTaskbar = false
+            };
+
+            var label = new Label
+            {
+                Text = "Nom de la sauvegarde :",
+                AutoSize = true,
+                Location = new Point(12, 18)
+            };
+
+            var input = new TextBox
+            {
+                Location = new Point(12, 44),
+                Width = 290
+            };
+
+            var ok = new Button
+            {
+                Text = "OK",
+                DialogResult = DialogResult.OK,
+                Location = new Point(140, 85),
+                Width = 80
+            };
+
+            var cancel = new Button
+            {
+                Text = "Annuler",
+                DialogResult = DialogResult.Cancel,
+                Location = new Point(230, 85),
+                Width = 80
+            };
+
+            dlg.Controls.Add(label);
+            dlg.Controls.Add(input);
+            dlg.Controls.Add(ok);
+            dlg.Controls.Add(cancel);
+            dlg.AcceptButton = ok;
+            dlg.CancelButton = cancel;
+
+            return dlg.ShowDialog(this) == DialogResult.OK
+                ? input.Text.Trim()
+                : string.Empty;
+        }
+
+        private string? PromptChoisirSauvegarde()
+        {
+            if (!ListerSauvegardes(out var noms, out var erreur))
+            {
+                MessageBox.Show($"Impossible de r�cup�rer les sauvegardes.\n\nD�tail: {erreur}", "Erreur PostgreSQL", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return null;
+            }
+
+            if (noms.Count == 0)
+            {
+                MessageBox.Show("Aucune sauvegarde disponible.", "Chargement", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return null;
+            }
+
+            using var dlg = new Form
+            {
+                Text = "Choisir une sauvegarde",
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                ClientSize = new Size(320, 220),
+                MinimizeBox = false,
+                MaximizeBox = false,
+                ShowInTaskbar = false
+            };
+
+            var list = new ListBox
+            {
+                Location = new Point(12, 12),
+                Size = new Size(290, 160)
+            };
+            list.Items.AddRange(noms.ToArray());
+
+            var ok = new Button
+            {
+                Text = "Charger",
+                DialogResult = DialogResult.OK,
+                Location = new Point(140, 180),
+                Width = 80
+            };
+
+            var cancel = new Button
+            {
+                Text = "Annuler",
+                DialogResult = DialogResult.Cancel,
+                Location = new Point(230, 180),
+                Width = 80
+            };
+
+            dlg.Controls.Add(list);
+            dlg.Controls.Add(ok);
+            dlg.Controls.Add(cancel);
+            dlg.AcceptButton = ok;
+            dlg.CancelButton = cancel;
+
+            return dlg.ShowDialog(this) == DialogResult.OK && list.SelectedItem is string s
+                ? s
+                : null;
+        }
+
         private void AppliquerEtatSauvegarde(EtatPartieSauvegarde etat)
         {
             gridLines = Math.Max(2, etat.GridLines);
@@ -872,9 +1018,15 @@ namespace jeu_de_point
                 return;
             }
 
-            if (SauvegarderDansPostgres(NomSauvegardeParDefaut, out string erreur))
+            string nomSauvegarde = PromptNomSauvegarde();
+            if (string.IsNullOrWhiteSpace(nomSauvegarde))
             {
-                MessageBox.Show("Partie sauvegard�e dans PostgreSQL.", "Sauvegarde", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return; // annul�
+            }
+
+            if (SauvegarderDansPostgres(nomSauvegarde, out string erreur))
+            {
+                MessageBox.Show($"Partie sauvegard�e sous '{nomSauvegarde}'.", "Sauvegarde", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
             {
@@ -884,13 +1036,19 @@ namespace jeu_de_point
 
         private void ChargerSauvegardeDepuisMenu()
         {
-            if (ChargerDepuisPostgres(NomSauvegardeParDefaut, out string erreur))
+            string? nomSauvegarde = PromptChoisirSauvegarde();
+            if (string.IsNullOrWhiteSpace(nomSauvegarde))
             {
-                MessageBox.Show("Sauvegarde charg�e depuis PostgreSQL.", "Chargement", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return; // annul� ou aucune
+            }
+
+            if (ChargerDepuisPostgres(nomSauvegarde, out string erreur))
+            {
+                MessageBox.Show($"Sauvegarde '{nomSauvegarde}' charg�e.", "Chargement", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
             {
-                MessageBox.Show($"Impossible de charger la sauvegarde.\n\nD�tail: {erreur}", "Erreur PostgreSQL", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show($"Impossible de charger la sauvegarde '{nomSauvegarde}'.\n\nD�tail: {erreur}", "Erreur PostgreSQL", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
 
