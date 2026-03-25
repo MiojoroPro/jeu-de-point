@@ -1442,6 +1442,7 @@ namespace jeu_de_point
             InitializeComponent();
             DoubleBuffered = true;
             ResizeRedraw = true;
+            KeyPreview = true; // pour capter les raccourcis clavier (Ctrl+chiffre)
 
             timerAnimationTir = new System.Windows.Forms.Timer { Interval = 20 };
             timerAnimationTir.Tick += TimerAnimationTir_Tick;
@@ -1464,6 +1465,35 @@ namespace jeu_de_point
             dessinerTerrain(e.Graphics);
             DessinerScores(e.Graphics);
             DessinerTourCourant(e.Graphics);
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            // Raccourcis Ctrl+1..9 pour régler rapidement la puissance de tir
+            if ((keyData & Keys.Control) == Keys.Control)
+            {
+                int? puissance = keyData switch
+                {
+                    Keys.Control | Keys.D1 or Keys.Control | Keys.NumPad1 => 1,
+                    Keys.Control | Keys.D2 or Keys.Control | Keys.NumPad2 => 2,
+                    Keys.Control | Keys.D3 or Keys.Control | Keys.NumPad3 => 3,
+                    Keys.Control | Keys.D4 or Keys.Control | Keys.NumPad4 => 4,
+                    Keys.Control | Keys.D5 or Keys.Control | Keys.NumPad5 => 5,
+                    Keys.Control | Keys.D6 or Keys.Control | Keys.NumPad6 => 6,
+                    Keys.Control | Keys.D7 or Keys.Control | Keys.NumPad7 => 7,
+                    Keys.Control | Keys.D8 or Keys.Control | Keys.NumPad8 => 8,
+                    Keys.Control | Keys.D9 or Keys.Control | Keys.NumPad9 => 9,
+                    _ => null
+                };
+
+                if (puissance.HasValue)
+                {
+                    inputPuissanceTir.Value = puissance.Value;
+                    return true; // on gère le raccourci
+                }
+            }
+
+            return base.ProcessCmdKey(ref msg, keyData);
         }
     }
 }
