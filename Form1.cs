@@ -1144,11 +1144,6 @@ namespace jeu_de_point
 
         private void JouerModeTir(Point clickPosition)
         {
-            if (!TryGetNearestIntersection(clickPosition, out var intersection))
-            {
-                return;
-            }
-
             if (!TryGetGridGeometry(out int startX, out int startY, out int gridSize, out float step))
             {
                 return;
@@ -1156,31 +1151,30 @@ namespace jeu_de_point
 
             int indexJoueur = indexJoueurCourant;
             PointF origineCanon = ObtenirPositionCanonPourJoueur(indexJoueur, startX, startY, gridSize, step);
+            int rowCanon = Math.Clamp(hauteursCanonsParJoueur[indexJoueur], 0, gridLines - 1);
+            int puissance = (int)inputPuissanceTir.Value; // 1 = proche, 9 = fond
 
-            float cibleX = startX + (intersection.Col * step);
-            float cibleY = startY + (intersection.Row * step);
-            PointF cible = new(cibleX, cibleY);
+            int indexPortee = (int)Math.Round((puissance - 1) * (gridLines - 1) / 8f);
+            indexPortee = Math.Clamp(indexPortee, 0, gridLines - 1);
 
-            float dx = cible.X - origineCanon.X;
-            float dy = cible.Y - origineCanon.Y;
-            float distance = (float)Math.Sqrt((dx * dx) + (dy * dy));
+            int colImpact = indexJoueur == 0
+                ? indexPortee // joueur 0 tire de la gauche vers la droite
+                : (gridLines - 1) - indexPortee; // joueur 1 tire de la droite vers la gauche
+
+            var intersection = (Col: colImpact, Row: rowCanon);
+
+            float cibleX = startX + (colImpact * step);
+            float cibleY = origineCanon.Y; // tir horizontal uniquement
+            PointF impact = new(cibleX, cibleY);
+
+            float distance = Math.Abs(cibleX - origineCanon.X);
             if (distance < 0.001f)
             {
                 return;
             }
 
-            int puissance = (int)inputPuissanceTir.Value;
-            float porteeMaxPixels = (puissance / 9f) * gridSize;
-
-            float t = Math.Min(1f, porteeMaxPixels / distance);
-            PointF impact = new(
-                origineCanon.X + (dx * t),
-                origineCanon.Y + (dy * t));
-
-            bool cibleAtteinte = distance <= porteeMaxPixels + 0.001f;
             bool detruitPoint = false;
-            if (cibleAtteinte
-                && pointsPoses.TryGetValue(intersection, out var proprietaire)
+            if (pointsPoses.TryGetValue(intersection, out var proprietaire)
                 && !ReferenceEquals(proprietaire, JoueurCourant)
                 && !PointAppartientALigneValidee(intersection))
             {
