@@ -68,6 +68,7 @@ namespace jeu_de_point
             public List<JoueurSauvegarde> Joueurs { get; set; } = [];
             public List<PointSauvegarde> Points { get; set; } = [];
             public List<LigneSauvegarde> Lignes { get; set; } = [];
+            public List<PointSauvegarde> PointsSupprimes { get; set; } = [];
         }
 
         private sealed class JoueurSauvegarde
@@ -109,6 +110,7 @@ namespace jeu_de_point
         private bool impactTraite;
         private bool tirDetruitPoint;
         private (int Col, int Row) pointDetruit;
+        private readonly Dictionary<(int Col, int Row), Joueur> pointsSupprimes = new();
 
         // M�thode isol�e pour brancher les �v�nements souris
         private void InitialiserEcouteSouris()
@@ -548,8 +550,12 @@ namespace jeu_de_point
             gridLines = Math.Max(2, valeurGridLines);
             pointsPoses.Clear();
             lignesAlignements.Clear();
+            pointsSupprimes.Clear();
             tirEnCours = false;
             progressionTir = 0f;
+            pointsSupprimes.Clear();
+
+
 
             InitialiserJoueursEtTour();
 
@@ -585,6 +591,7 @@ namespace jeu_de_point
             ];
 
             indexJoueurCourant = 0;
+            pointsSupprimes.Clear();
         }
 
         private Joueur JoueurCourant => joueurs[indexJoueurCourant];
@@ -593,6 +600,7 @@ namespace jeu_de_point
         {
             indexJoueurCourant = (indexJoueurCourant + 1) % joueurs.Length;
             SynchroniserControlesTour();
+            SauvegarderAutoEvenement();
         }
 
         private void SynchroniserControlesTour()
@@ -701,6 +709,22 @@ namespace jeu_de_point
                     DebutRow = ligne.Debut.Row,
                     FinCol = ligne.Fin.Col,
                     FinRow = ligne.Fin.Row,
+                    Proprietaire = indexProprietaire
+                });
+            }
+
+            foreach (var (position, proprietaire) in pointsSupprimes)
+            {
+                int indexProprietaire = Array.IndexOf(joueurs, proprietaire);
+                if (indexProprietaire < 0)
+                {
+                    continue;
+                }
+
+                etat.PointsSupprimes.Add(new PointSauvegarde
+                {
+                    Col = position.Col,
+                    Row = position.Row,
                     Proprietaire = indexProprietaire
                 });
             }
@@ -967,6 +991,21 @@ namespace jeu_de_point
                 pointsPoses[(point.Col, point.Row)] = joueurs[point.Proprietaire];
             }
 
+            foreach (var point in etat.PointsSupprimes)
+            {
+                if (point.Col < 0 || point.Col >= gridLines || point.Row < 0 || point.Row >= gridLines)
+                {
+                    continue;
+                }
+
+                if (point.Proprietaire < 0 || point.Proprietaire >= joueurs.Length)
+                {
+                    continue;
+                }
+
+                pointsSupprimes[(point.Col, point.Row)] = joueurs[point.Proprietaire];
+            }
+
             foreach (var ligne in etat.Lignes)
             {
                 if (ligne.Proprietaire < 0 || ligne.Proprietaire >= joueurs.Length)
@@ -1027,11 +1066,16 @@ namespace jeu_de_point
             if (SauvegarderDansPostgres(nomSauvegarde, out string erreur))
             {
                 MessageBox.Show($"Partie sauvegard�e sous '{nomSauvegarde}'.", "Sauvegarde", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
             }
-            else
-            {
-                MessageBox.Show($"Impossible de sauvegarder la partie.\n\nD�tail: {erreur}", "Erreur PostgreSQL", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+
+            MessageBox.Show($"Impossible de sauvegarder la partie.\n\nD�tail: {erreur}", "Erreur PostgreSQL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        private void SauvegarderAutoEvenement()
+        {
+            // Sauvegarde silencieuse sur un slot auto
+            _ = SauvegarderDansPostgres("autosave", out _);
         }
 
         private void ChargerSauvegardeDepuisMenu()
@@ -1241,9 +1285,19 @@ namespace jeu_de_point
                         && !PointAppartientALigneValidee(pointDetruit))
                     {
                         pointsPoses.Remove(pointDetruit);
+                        pointsSupprimes[pointDetruit] = proprietaire;
+                    }
+                    else if (!tirDetruitPoint
+                             && !pointsPoses.ContainsKey(pointDetruit)
+                             && pointsSupprimes.TryGetValue(pointDetruit, out var proprietaireSupprime)
+                             && ReferenceEquals(proprietaireSupprime, JoueurCourant))
+                    {
+                        pointsPoses[pointDetruit] = proprietaireSupprime;
+                        pointsSupprimes.Remove(pointDetruit);
                     }
 
                     impactTraite = true;
+                    SauvegarderAutoEvenement();
                 }
 
                 ticksPauseImpact++;
@@ -1272,6 +1326,7 @@ namespace jeu_de_point
 
             var joueurQuiJoue = JoueurCourant;
             pointsPoses[intersection] = joueurQuiJoue;
+            pointsSupprimes.Remove(intersection);
 
             var lignesCandidates = TrouverLignesCandidatesPose(intersection, joueurQuiJoue);
             int lignesValideesCeTour = 0;
@@ -1298,6 +1353,8 @@ namespace jeu_de_point
             {
                 PasserAuJoueurSuivant();
             }
+
+            SauvegarderAutoEvenement();
         }
 
         private void JouerModeTir(Point clickPosition)
